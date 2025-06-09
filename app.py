@@ -8,6 +8,8 @@ from web_exploitation.ssti import SSTIScanner
 from web_exploitation.osint import OSINTScanner
 from datetime import datetime
 from typing import Dict
+from web_exploitation.vulnerability import VulnerabilityScanner
+from network_tools.network_mapper import NetworkMapper
 
 # Set page config
 st.set_page_config(
@@ -172,13 +174,17 @@ def main():
         st.session_state.google_dorks = None
     if 'github_dorks' not in st.session_state:
         st.session_state.github_dorks = None
+    if 'vulnerability_results' not in st.session_state:
+        st.session_state.vulnerability_results = None
+    if 'network_map_results' not in st.session_state:
+        st.session_state.network_map_results = None
     
     # Sidebar for tool selection
     st.sidebar.title("Tools")
     tool = st.sidebar.selectbox(
         "Select Tool",
         ["SSTI Scanner", "SSRF Scanner", "Directory Fuzzer", "OSINT Scanner", 
-         "Google Dorks", "GitHub Dorks"]
+         "Google Dorks", "GitHub Dorks", "Vulnerability Scanner", "Network Mapper"]
     )
     
     # Main content area
@@ -228,12 +234,29 @@ def main():
                 
                 # Show progress
                 with st.spinner("Scanning for SSTI vulnerabilities..."):
-                    results = run_ssti_scan(url, cookies_dict, headers_dict, selected_payloads)
+                    report_content = run_ssti_scan(url, cookies_dict, headers_dict, selected_payloads)
                     
                     # Display results in a nice box
                     st.markdown('<div class="report-box">', unsafe_allow_html=True)
-                    st.text(results)
+                    if "Error" in report_content:
+                        st.error(report_content)
+                    else:
+                        st.subheader("Scan Results")
+                        st.code(report_content)
                     st.markdown('</div>', unsafe_allow_html=True)
+
+                # Store results in session state for potential download outside the form
+                st.session_state.ssti_report_content = report_content
+                st.session_state.ssti_scan_successful = True if "Error" not in report_content else False
+        
+        # Download button outside the form, displayed only if scan was successful
+        if st.session_state.get('ssti_scan_successful') and st.session_state.get('ssti_report_content'):
+            st.download_button(
+                label="Download SSTI Report",
+                data=st.session_state.ssti_report_content,
+                file_name=f"ssti_scan_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain"
+            )
     
     elif tool == "SSRF Scanner":
         st.header("Server-Side Request Forgery Scanner")
@@ -266,8 +289,25 @@ def main():
                     
                     # Display results
                     st.markdown('<div class="report-box">', unsafe_allow_html=True)
-                    st.text(results)
+                    if "Error" in results or """Error during ffuf scan:""" in results:
+                        st.error(results)
+                    else:
+                        st.subheader("FFUF Scan Results")
+                        st.code(results)
                     st.markdown('</div>', unsafe_allow_html=True)
+
+                # Store results in session state for potential download outside the form
+                st.session_state.ffuf_results_content = results
+                st.session_state.ffuf_scan_successful = True if "Error" not in results and """Error during ffuf scan:""" not in results else False
+
+        # Download button outside the form, displayed only if scan was successful
+        if st.session_state.get('ffuf_scan_successful') and st.session_state.get('ffuf_results_content'):
+            st.download_button(
+                label="Download FFUF Report",
+                data=st.session_state.ffuf_results_content,
+                file_name=f"ffuf_scan_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain"
+            )
     
     elif tool == "OSINT Scanner":
         st.header("OSINT Scanner")
@@ -286,7 +326,7 @@ def main():
                         # Create tabs for different sections
                         tabs = st.tabs([
                             "WHOIS", "DNS", "Subdomains", "Ports", 
-                            "Security", "SSL", "Wayback"
+                            "Web Server", "Technologies", "Email", "Security", "SSL", "Wayback"
                         ])
                         
                         # WHOIS Information
@@ -354,23 +394,66 @@ def main():
                             else:
                                 st.error(f"Port Scan Error: {port_data['error']}")
                         
-                        # Security Headers
+                        # Web Server Information
                         with tabs[4]:
+                            st.subheader("Web Server Information")
+                            web_server_data = results.get('web_server_info', {})
+                            if 'error' not in web_server_data:
+                                st.text(f"Server Header: {web_server_data.get('server_header', 'N/A')}")
+                                st.text(f"Status: {web_server_data.get('status', 'N/A')}")
+                            else:
+                                st.error(f"Web Server Info Error: {web_server_data['error']}")
+                        
+                        # Technology Detection
+                        with tabs[5]:
+                            st.subheader("Technology Detection")
+                            tech_data = results.get('technology_detection', {})
+                            if 'error' not in tech_data:
+                                if tech_data['technologies']:
+                                    for tech in tech_data['technologies']:
+                                        st.text(f"- {tech}")
+                                else:
+                                    st.info("No technologies detected.")
+                            else:
+                                st.error(f"Technology Detection Error: {tech_data['error']}")
+                        
+                        # Email Enumeration
+                        with tabs[6]:
+                            st.subheader("Email Enumeration")
+                            email_data = results.get('email_enumeration', {})
+                            if 'error' not in email_data:
+                                if email_data['emails']:
+                                    for email in email_data['emails']:
+                                        st.text(f"- {email}")
+                                else:
+                                    st.info("No emails found.")
+                            else:
+                                st.error(f"Email Enumeration Error: {email_data['error']}")
+                        
+                        # Security Headers
+                        with tabs[7]:
                             st.subheader("Security Headers")
                             headers_data = results.get('security_headers', {})
                             if 'error' not in headers_data:
+                                missing_headers = [h for h, info in headers_data.items() if info['status'] == 'Missing']
+                                if not missing_headers:
+                                    st.success("All critical security headers are set correctly!")
+                                else:
+                                    st.warning(f"Missing or improperly configured headers: {', '.join(missing_headers)}")
+                                
+                                st.markdown("--- ")
                                 for header, info in headers_data.items():
                                     col1, col2 = st.columns([1, 2])
                                     with col1:
-                                        st.markdown(f"**{header}**")
-                                        st.text(f"Status: {info['status']}")
+                                        status_color = "green" if info['status'] == 'Good' else "red"
+                                        st.markdown(f"**{header}** (<span style='color:{status_color}'>{info['status']}</span>)", unsafe_allow_html=True)
                                     with col2:
                                         st.text(f"Value: {info['value']}")
                             else:
                                 st.error(f"Security Headers Error: {headers_data['error']}")
                         
                         # SSL Information
-                        with tabs[5]:
+                        with tabs[8]:
                             st.subheader("SSL Certificate Information")
                             ssl_data = results.get('ssl_info', {})
                             if 'error' not in ssl_data:
@@ -394,7 +477,7 @@ def main():
                                 st.error(f"SSL Info Error: {ssl_data['error']}")
                         
                         # Wayback Machine
-                        with tabs[6]:
+                        with tabs[9]:
                             st.subheader("Wayback Machine Data")
                             wayback_data = results.get('wayback_machine', {})
                             if 'error' not in wayback_data:
@@ -404,12 +487,13 @@ def main():
                                     st.text(f"First Snapshot: {wayback_data.get('first_snapshot')}")
                                     st.text(f"Last Snapshot: {wayback_data.get('last_snapshot')}")
                                 
-                                if 'snapshots' in wayback_data:
+                                if 'snapshots' in wayback_data and wayback_data['snapshots']:
                                     st.markdown("**Recent Snapshots**")
                                     for snapshot in wayback_data['snapshots']:
-                                        st.markdown(f"**{snapshot['timestamp']}**")
-                                        st.text(f"URL: {snapshot['original']}")
-                                        st.text(f"Type: {snapshot['mimetype']}")
+                                        archive_url = f"https://web.archive.org/web/{snapshot['timestamp']}/{snapshot['original']}"
+                                        st.markdown(f"- [{snapshot['timestamp']}]({archive_url}) - {snapshot['original']}")
+                                else:
+                                    st.info("No recent snapshots available.")
                             else:
                                 st.error(f"Wayback Machine Error: {wayback_data['error']}")
                         
@@ -454,32 +538,43 @@ def main():
                     
                     # Display results
                     st.markdown('<div class="report-box">', unsafe_allow_html=True)
-                    for category in categories:
-                        if category in all_dorks:
-                            st.subheader(category)
-                            for dork in all_dorks[category]:
-                                st.markdown(f'<div class="dork-box">', unsafe_allow_html=True)
-                                st.markdown(f'**Dork:** `{dork}`')
-                                search_url = f"https://www.google.com/search?q={dork.replace(' ', '+')}"
-                                st.markdown(f'<div class="dork-url">[Search on Google]({search_url})</div>', unsafe_allow_html=True)
-                                st.markdown('</div>', unsafe_allow_html=True)
+                    if all_dorks and any(all_dorks.values()): # Check if any dorks were actually generated
+                        for category in categories:
+                            if category in all_dorks and all_dorks[category]:
+                                st.subheader(category)
+                                for dork in all_dorks[category]:
+                                    st.markdown(f'<div class="dork-box">', unsafe_allow_html=True)
+                                    st.markdown(f'**Dork:** `{dork}`')
+                                    search_url = f"https://www.google.com/search?q={dork.replace(' ', '+')}"
+                                    st.markdown(f'<div class="dork-url">[Search on Google]({search_url})</div>', unsafe_allow_html=True)
+                                    st.markdown('</div>', unsafe_allow_html=True)
+                            elif category in all_dorks and not all_dorks[category]:
+                                st.info(f"No dorks found for category: {category}")
+                        if not any(all_dorks[cat] for cat in categories if cat in all_dorks):
+                            st.warning("No dorks generated for the selected categories.")
+                    else:
+                        st.info("No Google dorks could be generated for the target. Please check the target domain.")
                     st.markdown('</div>', unsafe_allow_html=True)
         
         # Download button outside the form
-        if st.session_state.google_dorks:
+        if st.session_state.google_dorks and any(st.session_state.google_dorks.values()):
             dorks_text = ""
             for category, dorks in st.session_state.google_dorks.items():
-                dorks_text += f"\n{category}:\n"
-                for dork in dorks:
-                    dorks_text += f"- {dork}\n"
-                    dorks_text += f"  URL: https://www.google.com/search?q={dork.replace(' ', '+')}\n"
+                if dorks:
+                    dorks_text += f"\n{category}:\n"
+                    for dork in dorks:
+                        dorks_text += f"- {dork}\n"
+                        dorks_text += f"  URL: https://www.google.com/search?q={dork.replace(' ', '+')}\n"
             
-            st.download_button(
-                label="Download Dorks",
-                data=dorks_text,
-                file_name=f"google_dorks_{target}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                mime="text/plain"
-            )
+            if dorks_text.strip(): # Only show download button if there's content to download
+                st.download_button(
+                    label="Download Dorks",
+                    data=dorks_text,
+                    file_name=f"google_dorks_{target}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    mime="text/plain"
+                )
+            else:
+                st.info("No dorks available to download.")
     
     elif tool == "GitHub Dorks":
         st.header("GitHub Dorks Scanner")
@@ -505,57 +600,172 @@ def main():
                     return
                 
                 with st.spinner("Running GitHub dorks..."):
-                    scanner = OSINTScanner(target)
-                    results = scanner.github_dorking()
-                    st.session_state.github_dorks = results
+                    try:
+                        scanner = OSINTScanner(target)
+                        results = scanner.github_dorking()
+                        st.session_state.github_dorks = results
+                    except Exception as e:
+                        results = {'error': f"Error running GitHub dorking: {e}"}
+                        st.session_state.github_dorks = results
                     
                     # Display results
                     st.markdown('<div class="report-box">', unsafe_allow_html=True)
                     if 'error' not in results:
-                        for category, dork_results in results.items():
-                            if category in categories:
-                                st.subheader(category)
-                                for dork_result in dork_results:
-                                    st.markdown(f'<div class="dork-box">', unsafe_allow_html=True)
-                                    st.markdown(f'**Dork:** `{dork_result["dork"]}`')
-                                    for result_type, items in dork_result['results'].items():
-                                        if items:
-                                            st.markdown(f'**{result_type.upper()}:**')
-                                            for item in items:
-                                                st.markdown(f'- Repository: [{item["repository"]["full_name"]}]({item["repository"]["html_url"]})')
-                                                st.markdown(f'  - File: [{item["path"]}]({item["html_url"]})')
-                                                if item['repository']['description']:
-                                                    st.markdown(f'  - Description: {item["repository"]["description"]}')
-                                    st.markdown('</div>', unsafe_allow_html=True)
+                        if results and any(results.values()):
+                            for category in categories:
+                                if category in results and results[category]:
+                                    st.subheader(category)
+                                    for dork_result in results[category]:
+                                        st.markdown(f'<div class="dork-box">', unsafe_allow_html=True)
+                                        st.markdown(f'**Dork:** `{dork_result["dork"]}`')
+                                        for result_type, items in dork_result['results'].items():
+                                            if items:
+                                                st.markdown(f'**{result_type.upper()}:**')
+                                                for item in items:
+                                                    st.markdown(f'- Repository: [{item["repository"]["full_name"]}]({item["repository"]["html_url"]})')
+                                                    st.markdown(f'  - File: [{item["path"]}]({item["html_url"]})')
+                                                    if item['repository']['description']:
+                                                        st.markdown(f'  - Description: {item["repository"]["description"]}')
+                                        st.markdown('</div>', unsafe_allow_html=True)
+                                elif category in results and not results[category]:
+                                    st.info(f"No results found for category: {category}")
+                            if not any(results[cat] for cat in categories if cat in results):
+                                st.warning("No GitHub dorking results found for the selected categories.")
+                        else:
+                            st.info("No GitHub dorking results found for the target. Please check the target.")
                     else:
                         st.error(f"Error: {results['error']}")
                     st.markdown('</div>', unsafe_allow_html=True)
         
         # Download button outside the form
-        if st.session_state.github_dorks and 'error' not in st.session_state.github_dorks:
+        if st.session_state.github_dorks and 'error' not in st.session_state.github_dorks and any(st.session_state.github_dorks.values()):
             report = f"GitHub Dorking Report for {target}\n"
             report += "=" * 50 + "\n\n"
             
+            has_content_to_download = False
             for category, dork_results in st.session_state.github_dorks.items():
-                report += f"{category}:\n"
-                for dork_result in dork_results:
-                    report += f"\nDork: {dork_result['dork']}\n"
-                    for result_type, items in dork_result['results'].items():
-                        if items:
-                            report += f"\n{result_type.upper()}:\n"
-                            for item in items:
-                                report += f"- Repository: {item['repository']['full_name']}\n"
-                                report += f"  File: {item['path']}\n"
-                                report += f"  URL: {item['html_url']}\n"
-                                if item['repository']['description']:
-                                    report += f"  Description: {item['repository']['description']}\n"
+                if dork_results:
+                    report += f"{category}:\n"
+                    for dork_result in dork_results:
+                        report += f"\nDork: {dork_result['dork']}\n"
+                        for result_type, items in dork_result['results'].items():
+                            if items:
+                                report += f"\n{result_type.upper()}:\n"
+                                for item in items:
+                                    report += f"- Repository: {item['repository']['full_name']}\n"
+                                    report += f"  File: {item['path']}\n"
+                                    report += f"  URL: {item['html_url']}\n"
+                                    if item['repository']['description']:
+                                        report += f"  Description: {item['repository']['description']}\n"
+                                has_content_to_download = True
             
+            if has_content_to_download:
+                st.download_button(
+                    label="Download Report",
+                    data=report,
+                    file_name=f"github_dorks_{target}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    mime="text/plain"
+                )
+            else:
+                st.info("No GitHub dorking results available to download.")
+
+    elif tool == "Vulnerability Scanner":
+        st.header("Vulnerability Scanner")
+        
+        with st.form("vulnerability_scan_form"):
+            url = st.text_input("Target URL (e.g., https://example.com/?param=value)", 
+                                 help="Enter the full URL, including parameters, to scan for vulnerabilities.")
+            
+            scan_type = st.selectbox("Select Scan Type", ["XSS Scan"]) # Future expansion for other scan types
+            
+            submit_vulnerability_scan = st.form_submit_button("Run Vulnerability Scan")
+        
+        if submit_vulnerability_scan:
+            if not url:
+                st.error("Please enter a target URL.")
+                st.session_state.vulnerability_results = None # Clear previous results on error
+                return
+            
+            with st.spinner(f"Running {scan_type}..."):
+                scanner = VulnerabilityScanner(url)
+                results = scanner.run_all_scans()
+                st.session_state.vulnerability_results = results
+
+        # Display results and download button outside the form
+        if st.session_state.vulnerability_results:
+            if st.session_state.vulnerability_results.get('xss_vulnerabilities'):
+                st.subheader("XSS Scan Results")
+                for i, vuln in enumerate(st.session_state.vulnerability_results['xss_vulnerabilities']):
+                    st.markdown(f"**Vulnerability {i+1}**")
+                    st.markdown(f"- **Type:** `{vuln['vulnerability']}`")
+                    st.markdown(f"- **URL:** `{vuln['url']}`")
+                    st.markdown(f"- **Parameter:** `{vuln['parameter']}`")
+                    st.markdown(f"- **Payload Used:** `{vuln['payload_used']}`")
+                    st.markdown(f"- **Recommendation:** {vuln['recommendation']}")
+                    st.markdown("--- ")
+                
+                scanner_for_report = VulnerabilityScanner(st.session_state.vulnerability_results['target_url'])
+                report_content = scanner_for_report.generate_report(st.session_state.vulnerability_results)
+                st.download_button(
+                    label="Download XSS Report",
+                    data=report_content,
+                    file_name=f"xss_scan_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    mime="text/plain"
+                )
+            else:
+                st.info("No XSS vulnerabilities found for the given URL.")
+        elif submit_vulnerability_scan and not st.session_state.vulnerability_results:
+            st.error("An error occurred during the XSS scan or no results were returned.")
+
+    elif tool == "Network Mapper":
+        st.header("Network Mapper")
+
+        with st.form("network_mapper_form"):
+            target_host = st.text_input("Target Host (IP or Domain)",
+                                        help="Enter the IP address or domain name to scan (e.g., scanme.nmap.org).")
+            
+            scan_options = st.multiselect("Select Scan Options",
+                                         ["Quick Scan (-F)", "Service Version Detection (-sV)",
+                                          "OS Detection (-O)", "Aggressive Scan (-A)",
+                                          "All Ports (-p-)", "No Ping (-Pn)", "Verbose (-v)"],
+                                         default=["Quick Scan (-F)"])
+            
+            submit_network_scan = st.form_submit_button("Run Network Scan")
+
+        if submit_network_scan:
+            if not target_host:
+                st.error("Please enter a target host.")
+                st.session_state.network_mapper_results = None # Clear previous results on error
+                return
+            
+            with st.spinner(f"Running Network Scan on {target_host}..."):
+                mapper = NetworkMapper(target_host)
+                results = mapper.run_scan(scan_options)
+                st.session_state.network_mapper_results = results
+
+        # Display results and download button outside the form
+        if st.session_state.network_mapper_results:
+            st.subheader("Network Scan Results")
+            
+            if st.session_state.network_mapper_results.get('error'):
+                st.error(f"Error: {st.session_state.network_mapper_results['error']}")
+            elif st.session_state.network_mapper_results.get('output'):
+                st.code(st.session_state.network_mapper_results['output'], language='bash')
+            else:
+                st.info("No output from scan. Check target or options.")
+
+            # Generate and download report button
+            mapper_for_report = NetworkMapper(st.session_state.network_mapper_results['target'])
+            report_content = mapper_for_report.generate_report(st.session_state.network_mapper_results)
+
             st.download_button(
-                label="Download Report",
-                data=report,
-                file_name=f"github_dorks_{target}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                label="Download Network Scan Report",
+                data=report_content,
+                file_name=f"network_scan_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                 mime="text/plain"
             )
+        elif submit_network_scan and not st.session_state.network_mapper_results:
+            st.error("An error occurred during the network scan or no results were returned.")
 
 if __name__ == "__main__":
     main() 
